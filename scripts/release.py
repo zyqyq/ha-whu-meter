@@ -8,7 +8,9 @@
 
   流程：
   第1步  选择新版本号：基于 git 上最新 tag 给出 主版本/次版本/修订号 三种
-         预制递增方案，也可自行输入（如 v1.1.4 -> v2.0.0 / v1.2.0 / v1.1.5）
+         预制递增方案，也可自行输入（如 v1.1.4 -> v2.0.0 / v1.2.0 / v1.1.5）；
+         另提供「补发布」：为已存在的 tag 补发 Release（不改版本号、不建 commit），
+         适用于发版中断（如网络异常）后重试
   第2步  工作区检查：列出未提交文件（已暂存/未暂存/未跟踪），可选
          合并提交 / 撤回 / stash 保留（发版结束后自动复原）
   第3步  发版 commit：选择是否同步「用户使用说明.md」（页首适用版本 +
@@ -27,12 +29,17 @@
 GitHub 令牌（用于创建 Release 与上传资产，需 repo 权限），按以下顺序读取：
   1. 环境变量 GITHUB_TOKEN 或 GH_TOKEN
   2. 仓库根目录下的 .github_token 文件（已被 .gitignore 排除，写入一行 token 即可）
+
+关于 TLS：Python 3.13+ 默认启用证书严格校验（VERIFY_X509_STRICT），在部分
+Windows 证书库上会误报「Missing Authority Key Identifier」。脚本会自动关闭
+这一项额外检查（证书链与主机名校验仍开启），并在需要时回退使用 certifi 的 CA 包。
 """
 
 import argparse
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import urllib.error
@@ -56,6 +63,39 @@ def run(cmd, cwd=REPO_ROOT, capture=True):
     if r.returncode != 0:
         raise SystemExit(f"[错误] 命令失败: {' '.join(cmd)}\n{r.stderr.strip()}")
     return r.stdout.strip()
+
+
+# ------------------------------------------------------- GitHub API 的 TLS 上下文
+#
+# Python 3.13 起 ssl.create_default_context() 默认启用 VERIFY_X509_STRICT，
+# 该标志会额外要求证书链上每个 CA 证书都携带 authorityKeyIdentifier 扩展。
+# 部分 Windows 证书库里的根/中间证书不满足该要求，直连 api.github.com 时会报
+#   [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed:
+#    Missing Authority Key Identifier
+# 这里只关闭这一项额外的严格扩展检查（证书链与主机名校验仍保持开启）；
+# 若系统证书库仍校验不过，再回退尝试 certifi 提供的 CA 包。
+
+_SSL_CONTEXTS = None
+
+
+def ssl_contexts():
+    """按优先级返回 [(说明, SSLContext), ...]，结果缓存"""
+    global _SSL_CONTEXTS
+    if _SSL_CONTEXTS is not None:
+        return _SSL_CONTEXTS
+    ctxs = []
+    ctx = ssl.create_default_context()
+    strict = getattr(ssl, "VERIFY_X509_STRICT", 0)
+    if strict:
+        ctx.verify_flags &= ~strict
+    ctxs.append(("系统证书库", ctx))
+    try:
+        import certifi  # 可选依赖，未安装则跳过
+        ctxs.append(("certifi", ssl.create_default_context(cafile=certifi.where())))
+    except Exception:
+        pass
+    _SSL_CONTEXTS = ctxs
+    return ctxs
 
 
 def ask(prompt, default=None):
@@ -240,12 +280,31 @@ def gh_api(token, url, method="GET", data=None, content_type="application/json",
     if content_type:
         req.add_header("Content-Type", content_type)
     body = json.dumps(data).encode() if isinstance(data, dict) else data
-    try:
-        with urllib.request.urlopen(req, body) as resp:
-            raw = resp.read()
-            return resp.status, json.loads(raw) if raw else None
-    except urllib.error.HTTPError as e:
-        return e.code, (json.loads(e.read() or b"{}") if e.code != 404 else None)
+    last_err = None
+    for label, ctx in ssl_contexts():
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        try:
+            with opener.open(req, body, timeout=120) as resp:
+                raw = resp.read()
+                return resp.status, json.loads(raw) if raw else None
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return 404, None
+            raw = e.read()
+            try:
+                return e.code, json.loads(raw or b"{}")
+            except ValueError:  # 代理/网关可能返回 HTML 错误页
+                return e.code, {"message": raw.decode("utf-8", "replace")[:400]}
+        except urllib.error.URLError as e:
+            if "CERTIFICATE_VERIFY_FAILED" not in str(e) and not isinstance(e.reason, ssl.SSLError):
+                raise SystemExit(f"[错误] 无法连接 GitHub API（{label}）：{e}")
+            last_err = (label, e)  # 证书校验失败 -> 换下一个证书来源重试
+    tried = "、".join(label for label, _ in ssl_contexts())
+    raise SystemExit(
+        f"[错误] TLS 证书校验失败（已尝试：{tried}）\n"
+        f"  最后一次错误：{last_err[1]}\n"
+        "  可尝试：安装 certifi（pip install certifi），"
+        "或设置环境变量 SSL_CERT_FILE 指向可用的 CA 证书包。")
 
 
 def tag_exists(t):
@@ -342,6 +401,7 @@ def publish(tag, manual, no_generate, dry):
 # ---------------------------------------------------------------- 交互模式
 
 def choose_version():
+    """返回 (tag, republish)：republish=True 表示补发布已有 tag（不改版本号）"""
     latest = latest_tag()
     base = latest or "v0.0.0"
     print("\n【第 1 步 / 5】选择新版本号（git 上当前最新版本：" + base + "）")
@@ -349,9 +409,12 @@ def choose_version():
     print(f"  2) {bump_version(base, 'minor')}（次版本 +1）")
     print(f"  3) {bump_version(base, 'patch')}（修订号 +1）")
     print("  4) 自定义输入")
-    sel = ask_choice("请选择 [1/2/3/4] (3): ", {"1", "2", "3", "4"}, default="3")
+    print("  5) 补发布：为已存在的 tag 补发 Release（不改版本号、不新建 commit）")
+    sel = ask_choice("请选择 [1/2/3/4/5] (3): ", {"1", "2", "3", "4", "5"}, default="3")
+    if sel == "5":
+        return choose_existing_tag(), True
     if sel != "4":
-        return bump_version(base, {"1": "major", "2": "minor", "3": "patch"}[sel])
+        return bump_version(base, {"1": "major", "2": "minor", "3": "patch"}[sel]), False
     while True:
         tag = ask("请输入版本 tag（以 v 开头，如 v1.1.4）: ")
         if VER_RE.match(tag):
@@ -362,7 +425,64 @@ def choose_version():
         print(f"  [提示] {tag} 不高于当前最新版本 {latest}，发布时将覆盖已有 tag / Release")
         if ask_choice("  确认使用？[y/n] (n): ", {"y", "n"}) != "y":
             sys.exit("已取消")
-    return tag
+    return tag, False
+
+
+def choose_existing_tag():
+    """从本地已有 tag 中挑选一个，用于补发布"""
+    tags = run(["git", "tag", "--sort=-v:refname"]).split()
+    if not tags:
+        raise SystemExit("[错误] 本地没有任何 tag，无法补发布；请改用「新建版本号」流程")
+    at_head = set(run(["git", "tag", "--points-at", "HEAD"]).split())
+    print("\n  可补发布的 tag（本地已有）：")
+    for i, t in enumerate(tags, 1):
+        print(f"    {i}) {t}{'  <- 当前 HEAD' if t in at_head else ''}")
+    sel = ask_choice(f"  请选择 [1-{len(tags)}]: ", {str(i) for i in range(1, len(tags) + 1)})
+    return tags[int(sel) - 1]
+
+
+def ask_notes():
+    """第 5 步：Release notes 编写方式，返回 (manual, no_generate)"""
+    print("\n【第 5 步 / 5】Release notes 编写方式")
+    print("  1) 自动生成：综合上一个版本 tag 以来的 commit 记录")
+    print("  2) 手动编写：自己输入说明文字")
+    print("  3) 混合：手动内容在前，自动生成的变更列表追加在后（推荐）")
+    mode = ask_choice("请选择 [1/2/3] (3): ", {"1", "2", "3"}, default="3")
+    manual = ask_multiline("\n请输入手写说明：") if mode in ("2", "3") else ""
+    return manual, (mode == "2")
+
+
+def run_republish(tag):
+    """补发布模式：tag 已存在，只推送并按需创建 / 更新 Release"""
+    if not tag_exists(tag):
+        raise SystemExit(f"[错误] 本地不存在 tag {tag}")
+    manifest_ver = json.loads(MANIFEST.read_text(encoding="utf-8")).get("version")
+    print(f"\n【补发布】tag：{tag}")
+    print(f"  本地 HEAD       : {run(['git', 'rev-parse', '--short', 'HEAD'])}")
+    print(f"  manifest 版本号 : {manifest_ver}")
+    if manifest_ver != tag[1:]:
+        print(f"  [提示] manifest.json 版本号（{manifest_ver}）与 tag（{tag}）不一致；"
+              "补发布不会修改任何文件，如需同步请改用「新建版本号」流程")
+
+    manual, no_generate = ask_notes()
+
+    print("\n发布摘要")
+    print(f"  - 版本 tag    : {tag}")
+    print(f"  - 安装包      : whu_meter_{tag}.zip")
+    print("  - 操作        : 不新建 commit、不移动 tag，仅同步远端并创建/更新 Release")
+    print("\n  1) 直接发布")
+    print("  2) 先 dry-run 预览（不推送、不上传）")
+    print("  3) 取消")
+    act = ask_choice("请选择 [1/2/3] (1): ", {"1", "2", "3"}, default="1")
+    if act == "3":
+        print("已取消。")
+        return
+    if act == "2":
+        publish(tag, manual, no_generate, dry=True)
+        if ask_choice("\n按预览执行发布？[y/n] (y): ", {"y", "n"}, default="y") != "y":
+            print("已取消。")
+            return
+    publish(tag, manual, no_generate, dry=False)
 
 
 def interactive():
@@ -370,8 +490,11 @@ def interactive():
     print("  whu_meter 集成发布向导")
     print("=" * 56)
 
-    # 第 1 步：版本号
-    tag = choose_version()
+    # 第 1 步：版本号 / 补发布
+    tag, republish = choose_version()
+    if republish:
+        run_republish(tag)
+        return
     version = tag[1:]
 
     # 第 2 步：工作区
@@ -385,10 +508,12 @@ def interactive():
     changed = apply_version_updates(version, sync_doc)
     names = "、".join(p.name for p in changed) if changed else "（版本号均已一致，无文件改动）"
     print(f"  将更新：{names}")
-    print(f"  commit 信息：chore(release): bump version to {tag}")
-    run(["git", "add", *(p.relative_to(REPO_ROOT).as_posix() for p in changed)])
-    run(["git", "commit", "-m", f"chore(release): bump version to {tag}"])
-    print(f"  发版 commit 已创建：{run(['git', 'rev-parse', '--short', 'HEAD'])}")
+    if run(["git", "status", "--porcelain"]):
+        print(f"  commit 信息：chore(release): bump version to {tag}")
+        run(["git", "commit", "-m", f"chore(release): bump version to {tag}"])
+        print(f"  发版 commit 已创建：{run(['git', 'rev-parse', '--short', 'HEAD'])}")
+    else:
+        print("  版本号已一致且无其他改动，无需新建 commit，tag 将直接指向当前 HEAD")
 
     # 第 4 步：打 tag
     print(f"\n【第 4 步 / 5】打 tag")
@@ -396,13 +521,7 @@ def interactive():
     print(f"  tag {tag} 已指向发版 commit")
 
     # 第 5 步：notes 与发布
-    print(f"\n【第 5 步 / 5】Release notes 编写方式")
-    print("  1) 自动生成：综合上一个版本 tag 以来的 commit 记录")
-    print("  2) 手动编写：自己输入说明文字")
-    print("  3) 混合：手动内容在前，自动生成的变更列表追加在后（推荐）")
-    mode = ask_choice("请选择 [1/2/3] (3): ", {"1", "2", "3"}, default="3")
-    manual = ask_multiline("\n请输入手写说明：") if mode in ("2", "3") else ""
-    no_generate = (mode == "2")
+    manual, no_generate = ask_notes()
 
     print("\n发布摘要")
     print(f"  - 版本 tag    : {tag}")
@@ -410,7 +529,7 @@ def interactive():
     print(f"  - 发版 commit : {run(['git', 'rev-parse', '--short', 'HEAD'])}")
     print("\n  1) 直接发布（推送 commit + tag，创建/更新 Release）")
     print("  2) 先 dry-run 预览（不推送、不上传）")
-    print("  3) 取消（commit 与 tag 已创建，仅跳过发布，可稍后重跑本脚本补发布）")
+    print("  3) 取消（commit 与 tag 已在本地，可稍后重跑本脚本用「补发布」补上 Release）")
     act = ask_choice("请选择 [1/2/3] (1): ", {"1", "2", "3"}, default="1")
 
     try:
