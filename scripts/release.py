@@ -248,6 +248,12 @@ def gh_api(token, url, method="GET", data=None, content_type="application/json",
         return e.code, (json.loads(e.read() or b"{}") if e.code != 404 else None)
 
 
+def tag_exists(t):
+    r = subprocess.run(["git", "rev-parse", "-q", "--verify", t + "^{commit}"],
+                       cwd=REPO_ROOT, capture_output=True, text=True)
+    return r.returncode == 0
+
+
 def auto_notes(tag):
     """自上一个版本 tag 以来的 commit 列表"""
     cur = VER_RE.match(tag)
@@ -257,7 +263,9 @@ def auto_notes(tag):
         if m and tuple(map(int, m.groups())) < tuple(map(int, cur.groups())):
             prev = t
             break
-    rng = f"{prev}..{tag}" if prev else tag
+    # dry-run 预览时 tag 可能尚未创建，用 HEAD 代替
+    end = tag if tag_exists(tag) else "HEAD"
+    rng = f"{prev}..{end}" if prev else end
     log = run(["git", "log", rng, "--no-merges", "--pretty=- %h %s"])
     header = f"自上一个版本 {prev} 以来的变更：" if prev else "首个版本的变更："
     return f"{header}\n\n{log}" if log else ""
@@ -438,12 +446,16 @@ def release_cli(args):
         raise SystemExit(f"[错误] tag 格式应为 vX.Y.Z（当前：{tag}）")
     version = tag[1:]
 
-    changed = apply_version_updates(version, not args.no_doc)
-    run(["git", "add", *(p.relative_to(REPO_ROOT).as_posix() for p in changed)])
-    if run(["git", "status", "--porcelain"]):
-        run(["git", "commit", "-m", f"chore(release): bump version to {tag}"])
-    run(["git", "tag", "-f", tag])
-    print(f"发版 commit 与 tag {tag} 已就绪\n")
+    if args.dry_run:
+        print(f"[dry-run] 将同步 manifest.json{'' if args.no_doc else '、docs/用户使用说明.md 页首/页脚'}"
+              f" -> {version}，创建发版 commit（chore(release): bump version to {tag}）并打 tag {tag}")
+    else:
+        changed = apply_version_updates(version, not args.no_doc)
+        run(["git", "add", *(p.relative_to(REPO_ROOT).as_posix() for p in changed)])
+        if run(["git", "status", "--porcelain"]):
+            run(["git", "commit", "-m", f"chore(release): bump version to {tag}"])
+        run(["git", "tag", "-f", tag])
+        print(f"发版 commit 与 tag {tag} 已就绪\n")
     publish(tag, args.notes, args.no_generate, args.dry_run)
 
 
