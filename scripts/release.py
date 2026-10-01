@@ -77,6 +77,19 @@ def run(cmd, cwd=REPO_ROOT, capture=True):
 # 这里只关闭这一项额外的严格扩展检查（证书链与主机名校验仍保持开启）；
 # 若系统证书库仍校验不过，再回退尝试 certifi 提供的 CA 包。
 
+def transports():
+    """返回 [(说明, ProxyHandler, 超时秒数), ...]
+
+    优先「直连」：本机若装着开发代理/加速软件（如 DevSidecar）并将其设为系统代理，
+    该软件可能拦截 api.github.com 并返回自己的 500 错误页；此时直连反而是通的。
+    urllib 默认会读取环境变量与系统（Windows 注册表）代理设置，这里显式区分两条通道。
+    """
+    return [
+        ("直连（不使用代理）", urllib.request.ProxyHandler({}), 25),
+        ("系统代理 / 环境变量", urllib.request.ProxyHandler(), 120),
+    ]
+
+
 _SSL_CONTEXTS = None
 
 
@@ -276,37 +289,46 @@ def parse_owner_repo():
 
 
 def gh_api(token, url, method="GET", data=None, content_type="application/json", accept=None):
-    req = urllib.request.Request(url, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", accept or "application/vnd.github+json")
-    if content_type:
-        req.add_header("Content-Type", content_type)
+    """调用 GitHub API。会依次尝试 直连 / 系统代理 × 各证书来源，
+    遇到 5xx（多为本地代理或网关返回的错误页）即换下一条通道重试。"""
     body = json.dumps(data).encode() if isinstance(data, dict) else data
-    last_err = None
-    for label, ctx in ssl_contexts():
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+    attempts = [(f"{t} + {c}", ph, ctx, timeout)
+                for t, ph, timeout in transports()
+                for c, ctx in ssl_contexts()]
+
+    last_desc = "（无）"
+    for label, proxy, ctx, timeout in attempts:
+        req = urllib.request.Request(url, method=method)
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Accept", accept or "application/vnd.github+json")
+        if content_type:
+            req.add_header("Content-Type", content_type)
+        opener = urllib.request.build_opener(proxy, urllib.request.HTTPSHandler(context=ctx))
         try:
-            with opener.open(req, body, timeout=120) as resp:
+            with opener.open(req, body, timeout=timeout) as resp:
                 raw = resp.read()
                 return resp.status, json.loads(raw) if raw else None
         except urllib.error.HTTPError as e:
+            raw = e.read()
+            if e.code >= 500:  # 网关 / 本地代理的错误页，换通道重试
+                last_desc = f"{label} -> HTTP {e.code}：{raw[:160].decode('utf-8', 'replace')}"
+                continue
             if e.code == 404:
                 return 404, None
-            raw = e.read()
             try:
                 return e.code, json.loads(raw or b"{}")
             except ValueError:  # 代理/网关可能返回 HTML 错误页
                 return e.code, {"message": raw.decode("utf-8", "replace")[:400]}
         except urllib.error.URLError as e:
-            if "CERTIFICATE_VERIFY_FAILED" not in str(e) and not isinstance(e.reason, ssl.SSLError):
-                raise SystemExit(f"[错误] 无法连接 GitHub API（{label}）：{e}")
-            last_err = (label, e)  # 证书校验失败 -> 换下一个证书来源重试
-    tried = "、".join(label for label, _ in ssl_contexts())
+            last_desc = f"{label} -> {e}"
+            continue
+
     raise SystemExit(
-        f"[错误] TLS 证书校验失败（已尝试：{tried}）\n"
-        f"  最后一次错误：{last_err[1]}\n"
-        "  可尝试：安装 certifi（pip install certifi），"
-        "或设置环境变量 SSL_CERT_FILE 指向可用的 CA 证书包。")
+        "[错误] 无法连接 GitHub API，已尝试的通道：\n  "
+        + "\n  ".join(label for label, *_ in attempts)
+        + f"\n  最后一次失败：{last_desc}\n"
+        "  若信息中出现 DevSidecar / DS-Interceptor 等字样，说明本机代理软件拦截了\n"
+        "  该请求（常见于其 IP 优选探测失败）；退出该代理软件后重试即可。")
 
 
 def tag_exists(t):
