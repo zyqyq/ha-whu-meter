@@ -110,7 +110,7 @@ action:
 ## 版本发布流程
 
 1. 提交代码后打 tag：`git tag v1.1.4`
-2. 手动运行发布脚本：`python scripts/release.py`（可加 `--notes "手写说明"` 或 `--dry-run` 预览）
+2. 手动运行发布脚本：`python scripts/release.py` —— 不带参数运行会进入中文交互向导（数字选择 tag / notes 方式 / 发布或预览），也可直接用命令行参数：`python scripts/release.py v1.1.4 --notes "手写说明" --dry-run`
 3. 脚本自动完成：manifest 版本号与 tag 对齐 -> 打包 `whu_meter_vX.X.X.zip` -> 推送分支与 tag -> 在 GitHub 创建/更新 Release 并上传 zip -> 综合上一个 tag 以来的 commit 生成 Release notes
 
 首次使用前，将 GitHub PAT（repo 权限）写入仓库根目录 `.github_token` 文件，或设置环境变量 `GITHUB_TOKEN`。

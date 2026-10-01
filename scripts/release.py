@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """whu_meter 集成发布脚本（跨平台，仅依赖 Python 3.8+ 标准库）
 
-在打完 tag 后手动运行，一次性完成：
-  1. 版本号同步：将 manifest.json 的 version 与 tag 对齐（不一致时自动提交并把 tag 移到新提交）
-  2. 打包：生成 whu_meter_vX.X.X.zip（目录结构与手动安装要求一致）
-  3. 推送：推送当前分支与 tag 到 origin
-  4. Release：创建（或更新）GitHub Release，上传 zip 资产
-  5. Release notes：默认综合「上一个 tag 以来的 commit 记录」自动生成；
-     也可用 --notes 手动编写（手动内容在前，自动生成的 What's Changed 仍会追加，
-     如需完全手写可加 --no-generate）
+两种用法：
 
-用法（在仓库任意位置）：
+【交互模式】不带任何参数直接运行，进入中文逐步引导（数字选择）：
+  python scripts/release.py
+
+【命令行模式】适合熟练后快速发布：
   python scripts/release.py                     # 发布当前 HEAD 所在的最新 tag
   python scripts/release.py v1.1.4              # 发布指定 tag
-  python scripts/release.py --notes "修复了..."  # 手动编写 release notes
-  python scripts/release.py --no-generate       # 完全使用手写 notes，不自动追加
+  python scripts/release.py --notes "手写说明"   # 手动编写 release notes
+  python scripts/release.py --no-generate       # 不自动追加 GitHub 生成的 What's Changed
   python scripts/release.py --dry-run           # 只打印将执行的操作，不做任何修改
+
+脚本流程（两种模式一致）：
+  1. 版本号同步：将 manifest.json 的 version 与 tag 对齐（不一致时自动提交并把 tag 移到新提交）
+  2. 打包：生成 whu_meter_vX.X.X.zip
+  3. 推送：推送当前分支与 tag 到 origin
+  4. Release：创建（或更新）GitHub Release，上传 zip 资产
+  5. Release notes：综合「上一个 tag 以来的 commit 记录」自动生成，也可手动编写
 
 GitHub 令牌（用于创建 Release 与上传资产，需 repo 权限），按以下顺序读取：
   1. 环境变量 GITHUB_TOKEN 或 GH_TOKEN
@@ -39,12 +42,126 @@ EXCLUDE_IN_ZIP = {"__pycache__", ".DS_Store", "Thumbs.db", "desktop.ini"}
 EXCLUDE_SUFFIX = (".pyc", ".pyo", ".log")
 
 
+# ---------------------------------------------------------------- 基础工具
+
 def run(cmd, cwd=REPO_ROOT, capture=True):
     r = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True, encoding="utf-8")
     if r.returncode != 0:
         raise SystemExit(f"[错误] 命令失败: {' '.join(cmd)}\n{r.stderr.strip()}")
     return r.stdout.strip()
 
+
+def ask(prompt, default=None):
+    """读取一行输入；直接回车返回 default"""
+    s = input(prompt).strip()
+    return s if s else default
+
+
+def ask_choice(prompt, valid, default=None):
+    """循环询问，直到输入在 valid 中；直接回车取 default"""
+    while True:
+        s = ask(prompt, default)
+        if s in valid:
+            return s
+        print(f"  请输入 {'/'.join(valid)} 中的选项")
+
+
+def ask_multiline(prompt):
+    """多行输入：连续输入若干行，以单独一个空行结束"""
+    print(prompt + "（输入内容，单独一个空行结束）：")
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == "":
+            break
+        lines.append(line.rstrip())
+    return "\n".join(lines)
+
+
+def list_tags():
+    out = run(["git", "tag", "--sort=-creatordate"])
+    return out.split() if out else []
+
+
+# ---------------------------------------------------------------- 交互模式
+
+def interactive():
+    print("=" * 56)
+    print("  whu_meter 集成发布向导")
+    print("=" * 56)
+
+    # -- 第 1 步：选择 tag --
+    tags = list_tags()
+    head_tags = run(["git", "tag", "--points-at", "HEAD"]).split()
+    print("\n【第 1 步 / 4】选择要发布的版本 tag")
+    for i, t in enumerate(tags, 1):
+        mark = "  <- 当前 HEAD 所在" if t in head_tags else ""
+        print(f"  {i}) {t}{mark}")
+    print(f"  {len(tags) + 1}) 输入一个新 tag（在当前 HEAD 上创建）")
+    while True:
+        sel = ask(f"请选择 [1-{len(tags) + 1}]: ")
+        if sel.isdigit() and 1 <= int(sel) <= len(tags) + 1:
+            break
+        print("  输入无效，请重试")
+    n = int(sel)
+    if n <= len(tags):
+        tag = tags[n - 1]
+    else:
+        tag = ask("请输入新 tag 名（以 v 开头，如 v1.1.4）: ")
+        if not tag.startswith("v"):
+            raise SystemExit("[错误] tag 必须以 v 开头")
+        if tag in tags:
+            raise SystemExit(f"[错误] tag {tag} 已存在")
+        run(["git", "tag", tag])
+        print(f"  已在当前 HEAD 创建 tag {tag}")
+    if not tag.startswith("v"):
+        raise SystemExit(f"[错误] tag 应以 v 开头（当前：{tag}）")
+    version = tag[1:]
+
+    # -- 第 2 步：确认版本号同步 --
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    cur_ver = manifest.get("version")
+    print(f"\n【第 2 步 / 4】版本号同步")
+    if cur_ver == version:
+        print(f"  manifest.json 当前版本 {cur_ver}，与 tag 一致，无需修改")
+    else:
+        print(f"  manifest.json 当前版本 {cur_ver} 将更新为 {version}，")
+        print(f"  并自动提交（[skip ci]），tag {tag} 移动到该新提交")
+        ask_choice("  确认执行？[y/n] (y): ", {"y", "n"}, default="y") == "n" and sys.exit("已取消")
+
+    # -- 第 3 步：Release notes --
+    print("\n【第 3 步 / 4】Release notes 编写方式")
+    print("  1) 自动生成：综合上一个 tag 以来的 commit 记录")
+    print("  2) 手动编写：自己输入说明文字")
+    print("  3) 混合：手动内容在前，自动生成的变更列表追加在后（推荐）")
+    mode = ask_choice("请选择 [1/2/3] (3): ", {"1", "2", "3"}, default="3")
+    manual = ask_multiline("\n请输入手写说明：") if mode in ("2", "3") else ""
+    no_generate = (mode == "2")
+
+    # -- 第 4 步：确认并执行 --
+    print(f"\n【第 4 步 / 4】发布摘要")
+    print(f"  - tag / 版本号 : {tag} / {version}")
+    print(f"  - 安装包       : whu_meter_{tag}.zip")
+    owner_repo = "(发布时从 origin 解析)"
+    try:
+        owner_repo = "/".join(parse_owner_repo())
+    except SystemExit:
+        pass
+    print(f"  - 目标仓库     : {owner_repo}")
+    print("\n  1) 直接发布")
+    print("  2) 先 dry-run 预览（不做任何修改）")
+    print("  3) 取消")
+    act = ask_choice("请选择 [1/2/3] (1): ", {"1", "2", "3"}, default="1")
+    if act == "3":
+        sys.exit("已取消")
+    print()
+    return tag, manual, no_generate, act == "2"
+
+
+# ---------------------------------------------------------------- 发布流程
 
 def resolve_tag(explicit):
     if explicit:
@@ -118,9 +235,6 @@ def get_token():
 
 def parse_owner_repo():
     url = run(["git", "remote", "get-url", "origin"])
-    # 支持 git@github.com:owner/repo.git 与 https://github.com/owner/repo.git
-    for sep in (":github.com" + ":", "github.com/"):
-        pass
     if "github.com" in url:
         part = url.split("github.com")[-1].lstrip(":/")
         owner, repo = part.split("/")[:2]
@@ -202,8 +316,32 @@ def upload_release(token, owner, repo, tag, name, zip_path, body, generate, dry)
     print("\n完成。发布页：" + html_url)
 
 
+def release(tag, manual="", no_generate=False, dry=False):
+    if not tag.startswith("v"):
+        raise SystemExit(f"[错误] tag 应以 v 开头（当前：{tag}）")
+    version = tag[1:]
+    print(f"发布目标：{tag}（集成版本号 {version}）\n")
+
+    sync_version(tag, version, dry)
+    zip_path = build_zip(tag, version, dry)
+    push(tag, dry)
+
+    token = get_token()
+    owner, repo = parse_owner_repo()
+    print(f"[4/5] 目标仓库：{owner}/{repo}")
+    body, generate = build_notes(tag, manual, no_generate)
+    name = f"whu_meter {tag}"
+    upload_release(token, owner, repo, tag, name, zip_path, body, generate, dry)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="whu_meter 集成发布脚本")
+    # 不带参数 -> 交互模式
+    if len(sys.argv) == 1:
+        tag, manual, no_generate, dry = interactive()
+        release(tag, manual, no_generate, dry)
+        return
+
+    ap = argparse.ArgumentParser(description="whu_meter 集成发布脚本（不带参数运行进入交互向导）")
     ap.add_argument("tag", nargs="?", help="要发布的 tag（默认取当前 HEAD 上的 tag）")
     ap.add_argument("--notes", default="", help="手动编写的 release notes")
     ap.add_argument("--no-generate", action="store_true", help="不自动追加 GitHub 生成的 What's Changed")
@@ -211,21 +349,7 @@ def main():
     args = ap.parse_args()
 
     tag = resolve_tag(args.tag)
-    if not tag.startswith("v"):
-        raise SystemExit(f"[错误] tag 应以 v 开头（当前：{tag}）")
-    version = tag[1:]
-    print(f"发布目标：{tag}（集成版本号 {version}）\n")
-
-    sync_version(tag, version, args.dry_run)
-    zip_path = build_zip(tag, version, args.dry_run)
-    push(tag, args.dry_run)
-
-    token = get_token()
-    owner, repo = parse_owner_repo()
-    print(f"[4/5] 目标仓库：{owner}/{repo}")
-    body, generate = build_notes(tag, args.notes, args.no_generate)
-    name = f"whu_meter {tag}"
-    upload_release(token, owner, repo, tag, name, zip_path, body, generate, args.dry_run)
+    release(tag, args.notes, args.no_generate, args.dry_run)
 
 
 if __name__ == "__main__":
