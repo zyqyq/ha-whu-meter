@@ -14,7 +14,8 @@
   python scripts/release.py --dry-run           # 只打印将执行的操作，不做任何修改
 
 脚本流程（两种模式一致）：
-  1. 版本号同步：将 manifest.json 的 version 与 tag 对齐（不一致时自动提交并把 tag 移到新提交）
+  1. 版本号同步：将 manifest.json 的 version 与 docs/用户使用说明.md 页脚的「本文档对应
+     whu_meter vX.Y.Z」一并对齐到 tag（不一致时自动提交并把 tag 移到新提交）
   2. 打包：生成 whu_meter_vX.X.X.zip
   3. 推送：推送当前分支与 tag 到 origin
   4. Release：创建（或更新）GitHub Release，上传 zip 资产
@@ -28,6 +29,7 @@ GitHub 令牌（用于创建 Release 与上传资产，需 repo 权限），按�
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -38,6 +40,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_DIR = REPO_ROOT / "custom_components" / "whu_meter"
 MANIFEST = COMPONENT_DIR / "manifest.json"
+USER_DOC = REPO_ROOT / "docs" / "用户使用说明.md"
 EXCLUDE_IN_ZIP = {"__pycache__", ".DS_Store", "Thumbs.db", "desktop.ini"}
 EXCLUDE_SUFFIX = (".pyc", ".pyo", ".log")
 
@@ -86,6 +89,15 @@ def list_tags():
     return out.split() if out else []
 
 
+def doc_footer_stale(version):
+    """用户使用说明页脚版本号是否落后于给定版本"""
+    if not USER_DOC.exists():
+        return False
+    text = USER_DOC.read_text(encoding="utf-8")
+    return bool(re.search(r"本文档对应\s*whu_meter\s*v[\d.]+", text)) and \
+        not re.search(rf"本文档对应\s*whu_meter\s*v{re.escape(version)}\b", text)
+
+
 # ---------------------------------------------------------------- 交互模式
 
 def interactive():
@@ -124,11 +136,15 @@ def interactive():
     # -- 第 2 步：确认版本号同步 --
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     cur_ver = manifest.get("version")
-    print(f"\n【第 2 步 / 4】版本号同步")
-    if cur_ver == version:
+    print(f"\n【第 2 步 / 4】版本号同步（manifest.json 与 使用说明页脚）")
+    if cur_ver == version and not doc_footer_stale(version):
         print(f"  manifest.json 当前版本 {cur_ver}，与 tag 一致，无需修改")
     else:
-        print(f"  manifest.json 当前版本 {cur_ver} 将更新为 {version}，")
+        print(f"  将把以下位置的版本号统一为 {version}：")
+        if cur_ver != version:
+            print(f"    - manifest.json：{cur_ver} -> {version}")
+        if doc_footer_stale(version):
+            print(f"    - docs/用户使用说明.md 页脚：「本文档对应 whu_meter v...」 -> v{version}")
         print(f"  并自动提交（[skip ci]），tag {tag} 移动到该新提交")
         ask_choice("  确认执行？[y/n] (y): ", {"y", "n"}, default="y") == "n" and sys.exit("已取消")
 
@@ -175,19 +191,43 @@ def resolve_tag(explicit):
 
 
 def sync_version(tag, version, dry):
+    """将 manifest.json 的 version 与用户使用说明页脚的版本字样对齐到 tag。"""
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    if manifest.get("version") == version:
-        print(f"[1/5] 版本号已同步：manifest.json = {version}")
+    m_changed = manifest.get("version") != version
+
+    d_changed = False
+    if USER_DOC.exists():
+        doc_text = USER_DOC.read_text(encoding="utf-8")
+        doc_new = re.sub(r"(本文档对应\s*whu_meter\s*v)[\d.]+", rf"\g<1>{version}", doc_text)
+        d_changed = doc_new != doc_text
+    else:
+        doc_new = None
+
+    if not m_changed and not d_changed:
+        print(f"[1/5] 版本号已同步：manifest.json = {version}，使用说明页脚 = v{version}")
         return
     if dry:
-        print(f"[1/5] (dry-run) 将把 manifest.json 版本号 {manifest.get('version')} -> {version} 并提交、移动 tag")
+        detail = []
+        if m_changed:
+            detail.append(f"manifest.json {manifest.get('version')} -> {version}")
+        if d_changed:
+            detail.append("使用说明页脚 -> " + f"v{version}")
+        print(f"[1/5] (dry-run) 将更新 {'、'.join(detail)} 并提交、移动 tag")
         return
-    manifest["version"] = version
-    MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    run(["git", "add", str(MANIFEST.relative_to(REPO_ROOT).as_posix())])
+
+    if m_changed:
+        manifest["version"] = version
+        MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if d_changed:
+        USER_DOC.write_text(doc_new, encoding="utf-8")
+
+    add_paths = [str(MANIFEST.relative_to(REPO_ROOT).as_posix())]
+    if d_changed:
+        add_paths.append(str(USER_DOC.relative_to(REPO_ROOT).as_posix()))
+    run(["git", "add", *add_paths])
     run(["git", "commit", "-m", f"chore(release): 同步集成版本号至 {tag} [skip ci]"])
     run(["git", "tag", "-f", tag])
-    print(f"[1/5] manifest.json 版本号已更新为 {version}，tag 已移动到新提交")
+    print(f"[1/5] 版本号已更新为 {version}（manifest{'、使用说明页脚' if d_changed else ''}），tag 已移动到新提交")
 
 
 def build_zip(tag, version, dry):
