@@ -57,7 +57,7 @@
           "scan_interval_minutes": "抓取频率（分钟）",
           "balance_warn_threshold": "余额告警阈值（元）",
           "email_alert_enabled": "余额过低邮件警报（自动创建自动化）",
-          "email_notify_entity": "SMTP 通知实体（需先在「设备与服务」中配置邮件通知集成）"
+          "email_notify_entity": "邮件报警 SMTP 收件人"
         }
       }
     }
