@@ -63,7 +63,7 @@
 
 推荐使用交互向导：`python scripts/release.py`（不带参数运行）。
 
-1. **选择新版本号**：基于 git 上最新 tag 给出主版本 / 次版本 / 修订号三种递增方案，也可自定义输入（如 v1.1.5 -> v2.0.0 / v1.2.0 / v1.1.6）
+1. **选择新版本号**：基于 git 上最新 tag 给出主版本 / 次版本 / 修订号三种递增方案，也可自定义输入（如 v1.1.5 -> v2.0.0 / v1.2.0 / v1.1.6）；另可选 **5) 补发布**：为已存在的 tag 补发 Release（不改版本号、不建 commit），用于发版中断（如网络异常）后的重试
 2. **工作区检查**：列出未提交文件（已暂存/未暂存/未跟踪），可选 合并提交（并入发版 commit，未跟踪文件需自行处理后继续）/ 撤回（丢弃，需二次确认）/ stash 保留（发版结束后自动复原）
 3. **发版 commit**：选择是否同步「用户使用说明.md」（页首适用版本 + 页尾版本字样），与 manifest.json 一并提交为 `chore(release): bump version to vX.Y.Z`
 4. **打 tag**：自动在发版 commit 上打 tag
@@ -72,3 +72,13 @@
 熟练后可用命令行模式（要求工作区干净）：`python scripts/release.py v1.1.5 --notes "说明" [--no-doc] [--dry-run]`。
 
 首次使用前，将 GitHub PAT（repo 权限）写入仓库根目录 `.github_token` 文件，或设置环境变量 `GITHUB_TOKEN`。
+
+### TLS 证书问题说明
+
+Python 3.13 起 `ssl.create_default_context()` 默认启用 `VERIFY_X509_STRICT`，会额外要求证书链上每个 CA 证书都携带 `authorityKeyIdentifier` 扩展。部分 Windows 证书库（以及本地代理软件自签的根证书）不满足该要求，直连 `api.github.com` 时会报：
+
+```
+[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Missing Authority Key Identifier
+```
+
+脚本会自动关闭这一项额外的严格扩展检查（**证书链与主机名校验仍然开启**），失败时回退尝试 `certifi` 的 CA 包，仍不行则提示设置 `SSL_CERT_FILE`。此问题只影响发布脚本的 API 调用，不影响 `git push`（走 SSH）。
