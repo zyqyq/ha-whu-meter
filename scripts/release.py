@@ -61,7 +61,9 @@ VER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 def run(cmd, cwd=REPO_ROOT, capture=True):
     r = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True, encoding="utf-8")
     if r.returncode != 0:
-        raise SystemExit(f"[错误] 命令失败: {' '.join(cmd)}\n{r.stderr.strip()}")
+        # git 的部分提示（如 "no changes added to commit"）写在 stdout，stderr 可能为空
+        detail = (r.stderr or "").strip() or (r.stdout or "").strip()
+        raise SystemExit(f"[错误] 命令失败: {' '.join(cmd)}\n{detail}")
     return r.stdout.strip()
 
 
@@ -508,7 +510,9 @@ def interactive():
     changed = apply_version_updates(version, sync_doc)
     names = "、".join(p.name for p in changed) if changed else "（版本号均已一致，无文件改动）"
     print(f"  将更新：{names}")
-    if run(["git", "status", "--porcelain"]):
+    if changed:
+        run(["git", "add", *(p.relative_to(REPO_ROOT).as_posix() for p in changed)])
+    if run(["git", "status", "--porcelain"]):  # 含第 2 步「合并提交」带入的暂存内容
         print(f"  commit 信息：chore(release): bump version to {tag}")
         run(["git", "commit", "-m", f"chore(release): bump version to {tag}"])
         print(f"  发版 commit 已创建：{run(['git', 'rev-parse', '--short', 'HEAD'])}")
