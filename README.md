@@ -61,9 +61,14 @@
 
 ## 版本发布流程
 
-1. 提交代码后打 tag：`git tag v1.1.4`
-2. 手动运行发布脚本：`python scripts/release.py` —— 不带参数运行会进入中文交互向导（数字选择 tag / notes 方式 / 发布或预览），也可直接用命令行参数：`python scripts/release.py v1.1.4 --notes "手写说明" --dry-run`
-3. 脚本自动完成：manifest 版本号与 tag 对齐 -> 打包 `whu_meter_vX.X.X.zip` -> 推送分支与 tag -> 在 GitHub 创建/更新 Release 并上传 zip -> 综合上一个 tag 以来的 commit 生成 Release notes
+推荐使用交互向导：`python scripts/release.py`（不带参数运行）。
+
+1. **选择新版本号**：基于 git 上最新 tag 给出主版本 / 次版本 / 修订号三种递增方案，也可自定义输入（如 v1.1.5 -> v2.0.0 / v1.2.0 / v1.1.6）
+2. **工作区检查**：列出未提交文件（已暂存/未暂存/未跟踪），可选 合并提交（并入发版 commit，未跟踪文件需自行处理后继续）/ 撤回（丢弃，需二次确认）/ stash 保留（发版结束后自动复原）
+3. **发版 commit**：选择是否同步「用户使用说明.md」（页首适用版本 + 页尾版本字样），与 manifest.json 一并提交为 `chore(release): bump version to vX.Y.Z`
+4. **打 tag**：自动在发版 commit 上打 tag
+5. **发布**：编写 Release notes（自动生成 / 手动 / 混合），支持先 dry-run 预览再按预览执行；发布同时推送发版 commit 与 tag，创建/更新 Release 并上传 `whu_meter_vX.Y.Z.zip`
+
+熟练后可用命令行模式（要求工作区干净）：`python scripts/release.py v1.1.5 --notes "说明" [--no-doc] [--dry-run]`。
 
 首次使用前，将 GitHub PAT（repo 权限）写入仓库根目录 `.github_token` 文件，或设置环境变量 `GITHUB_TOKEN`。
-

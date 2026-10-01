@@ -6,20 +6,23 @@
 【交互模式】不带任何参数直接运行，进入中文逐步引导（数字选择）：
   python scripts/release.py
 
-【命令行模式】适合熟练后快速发布：
-  python scripts/release.py                     # 发布当前 HEAD 所在的最新 tag
-  python scripts/release.py v1.1.4              # 发布指定 tag
-  python scripts/release.py --notes "手写说明"   # 手动编写 release notes
-  python scripts/release.py --no-generate       # 不自动追加 GitHub 生成的 What's Changed
-  python scripts/release.py --dry-run           # 只打印将执行的操作，不做任何修改
+  流程：
+  第1步  选择新版本号：基于 git 上最新 tag 给出 主版本/次版本/修订号 三种
+         预制递增方案，也可自行输入（如 v1.1.4 -> v2.0.0 / v1.2.0 / v1.1.5）
+  第2步  工作区检查：列出未提交文件（已暂存/未暂存/未跟踪），可选
+         合并提交 / 撤回 / stash 保留（发版结束后自动复原）
+  第3步  发版 commit：选择是否同步「用户使用说明.md」（页首适用版本 +
+         页尾版本字样），与 manifest.json 一并提交为
+         chore(release): bump version to vX.Y.Z
+  第4步  自动在发版 commit 上打 tag
+  第5步  Release notes 编写（自动/手写/混合）与发布（支持先 dry-run
+         预览再确认执行），发布同时推送发版 commit 与 tag
 
-脚本流程（两种模式一致）：
-  1. 版本号同步：将 manifest.json 的 version 与 docs/用户使用说明.md 页脚的「本文档对应
-     whu_meter vX.Y.Z」一并对齐到 tag（不一致时自动提交并把 tag 移到新提交）
-  2. 打包：生成 whu_meter_vX.X.X.zip
-  3. 推送：推送当前分支与 tag 到 origin
-  4. Release：创建（或更新）GitHub Release，上传 zip 资产
-  5. Release notes：综合「上一个 tag 以来的 commit 记录」自动生成，也可手动编写
+【命令行模式】适合熟练后快速发布（要求工作区干净）：
+  python scripts/release.py v1.1.5              # 直接发布指定版本
+  python scripts/release.py v1.1.5 --notes "说明"
+  python scripts/release.py v1.1.5 --no-doc     # 不同步使用说明页脚/页首
+  python scripts/release.py v1.1.5 --dry-run    # 只打印将执行的操作
 
 GitHub 令牌（用于创建 Release 与上传资产，需 repo 权限），按以下顺序读取：
   1. 环境变量 GITHUB_TOKEN 或 GH_TOKEN
@@ -43,6 +46,7 @@ MANIFEST = COMPONENT_DIR / "manifest.json"
 USER_DOC = REPO_ROOT / "docs" / "用户使用说明.md"
 EXCLUDE_IN_ZIP = {"__pycache__", ".DS_Store", "Thumbs.db", "desktop.ini"}
 EXCLUDE_SUFFIX = (".pyc", ".pyo", ".log")
+VER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -55,13 +59,11 @@ def run(cmd, cwd=REPO_ROOT, capture=True):
 
 
 def ask(prompt, default=None):
-    """读取一行输入；直接回车返回 default"""
     s = input(prompt).strip()
     return s if s else default
 
 
 def ask_choice(prompt, valid, default=None):
-    """循环询问，直到输入在 valid 中；直接回车取 default"""
     while True:
         s = ask(prompt, default)
         if s in valid:
@@ -70,7 +72,6 @@ def ask_choice(prompt, valid, default=None):
 
 
 def ask_multiline(prompt):
-    """多行输入：连续输入若干行，以单独一个空行结束"""
     print(prompt + "（输入内容，单独一个空行结束）：")
     lines = []
     while True:
@@ -84,156 +85,116 @@ def ask_multiline(prompt):
     return "\n".join(lines)
 
 
-def list_tags():
-    out = run(["git", "tag", "--sort=-creatordate"])
-    return out.split() if out else []
+def latest_tag():
+    """git 上最新的版本 tag（按版本号排序取最高），无 tag 时返回 None"""
+    tags = [t for t in run(["git", "tag", "--sort=-v:refname"]).split() if VER_RE.match(t)]
+    return tags[0] if tags else None
 
+
+def bump_version(latest, part):
+    m = VER_RE.match(latest)
+    x, y, z = (int(m.group(i)) for i in (1, 2, 3))
+    if part == "major":
+        return f"v{x + 1}.0.0"
+    if part == "minor":
+        return f"v{x}.{y + 1}.0"
+    return f"v{x}.{y}.{z + 1}"
+
+
+# ---------------------------------------------------------------- 工作区处理
+
+def detect_changes():
+    staged = run(["git", "diff", "--cached", "--name-only"]).splitlines()
+    unstaged = run(["git", "diff", "--name-only"]).splitlines()
+    untracked = run(["git", "ls-files", "--others", "--exclude-standard"]).splitlines()
+    return staged, unstaged, untracked
+
+
+def print_changes(staged, unstaged, untracked):
+    for f in staged:
+        print(f"  [已暂存] {f}")
+    for f in unstaged:
+        print(f"  [未暂存] {f}")
+    for f in untracked:
+        print(f"  [未跟踪] {f}")
+
+
+def handle_changes(interactive_label="第 2 步 / 5"):
+    """处理未提交文件。返回 'merged'（并入发版 commit）/ 'stashed'（结束后复原）/ None"""
+    staged, unstaged, untracked = detect_changes()
+    if not (staged or unstaged or untracked):
+        print(f"\n【{interactive_label}】工作区检查：无未提交文件，跳过")
+        return None
+
+    print(f"\n【{interactive_label}】工作区检查：发现未提交文件（相对仓库根目录）：")
+    print_changes(staged, unstaged, untracked)
+    print("\n  1) 合并提交：与版本号同步一并计入发版 commit")
+    print("  2) 撤回：丢弃全部未提交修改（不可恢复！）")
+    print("  3) 保留：stash 暂存，发版结束后自动复原")
+    act = ask_choice("请选择 [1/2/3] (1): ", {"1", "2", "3"}, default="1")
+
+    if act == "1":
+        run(["git", "add", "-u"])  # 暂存所有未暂存的已跟踪文件
+        while True:
+            _, _, untracked = detect_changes()
+            if not untracked:
+                break
+            print("\n  [警告] 仍存在未跟踪文件（git add -u 不会包含它们）：")
+            for f in untracked:
+                print(f"  [未跟踪] {f}")
+            print("  请自行处理（加入 git add 或删除）后继续。")
+            ask("  处理完成后输入 y 继续: ")
+        return "merged"
+
+    if act == "2":
+        print("\n  [危险] 即将丢弃以下全部未提交内容（不可恢复）：")
+        print_changes(staged, unstaged, untracked)
+        if ask_choice("  确认撤回？[y/n] (n): ", {"y", "n"}) != "y":
+            sys.exit("已取消")
+        run(["git", "reset", "--hard", "HEAD"])
+        run(["git", "clean", "-fd"])
+        print("  工作区已还原到 HEAD")
+        return None
+
+    run(["git", "stash", "push", "-u", "-m", "release.py 自动暂存"])
+    print("  已 stash 全部未提交内容（含未跟踪），发版结束后自动复原")
+    return "stashed"
+
+
+# ---------------------------------------------------------------- 版本同步
 
 def doc_footer_stale(version):
-    """用户使用说明页脚版本号是否落后于给定版本"""
     if not USER_DOC.exists():
         return False
     text = USER_DOC.read_text(encoding="utf-8")
-    return bool(re.search(r"本文档对应\s*whu_meter\s*v[\d.]+", text)) and \
-        not re.search(rf"本文档对应\s*whu_meter\s*v{re.escape(version)}\b", text)
+    has_footer = bool(re.search(r"本文档对应\s*whu_meter\s*v[\d.]+", text))
+    return has_footer and not re.search(rf"本文档对应\s*whu_meter\s*v{re.escape(version)}\b", text)
 
 
-# ---------------------------------------------------------------- 交互模式
-
-def interactive():
-    print("=" * 56)
-    print("  whu_meter 集成发布向导")
-    print("=" * 56)
-
-    # -- 第 1 步：选择 tag --
-    tags = list_tags()
-    head_tags = run(["git", "tag", "--points-at", "HEAD"]).split()
-    print("\n【第 1 步 / 4】选择要发布的版本 tag")
-    for i, t in enumerate(tags, 1):
-        mark = "  <- 当前 HEAD 所在" if t in head_tags else ""
-        print(f"  {i}) {t}{mark}")
-    print(f"  {len(tags) + 1}) 输入一个新 tag（在当前 HEAD 上创建）")
-    while True:
-        sel = ask(f"请选择 [1-{len(tags) + 1}]: ")
-        if sel.isdigit() and 1 <= int(sel) <= len(tags) + 1:
-            break
-        print("  输入无效，请重试")
-    n = int(sel)
-    if n <= len(tags):
-        tag = tags[n - 1]
-    else:
-        tag = ask("请输入新 tag 名（以 v 开头，如 v1.1.4）: ")
-        if not tag.startswith("v"):
-            raise SystemExit("[错误] tag 必须以 v 开头")
-        if tag in tags:
-            raise SystemExit(f"[错误] tag {tag} 已存在")
-        run(["git", "tag", tag])
-        print(f"  已在当前 HEAD 创建 tag {tag}")
-    if not tag.startswith("v"):
-        raise SystemExit(f"[错误] tag 应以 v 开头（当前：{tag}）")
-    version = tag[1:]
-
-    # -- 第 2 步：确认版本号同步 --
+def apply_version_updates(version, sync_doc):
+    """将 manifest.json（必改）与使用说明页首/页脚（可选）写到指定版本，返回改动文件路径列表"""
+    paths = []
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    cur_ver = manifest.get("version")
-    print(f"\n【第 2 步 / 4】版本号同步（manifest.json 与 使用说明页脚）")
-    if cur_ver == version and not doc_footer_stale(version):
-        print(f"  manifest.json 当前版本 {cur_ver}，与 tag 一致，无需修改")
-    else:
-        print(f"  将把以下位置的版本号统一为 {version}：")
-        if cur_ver != version:
-            print(f"    - manifest.json：{cur_ver} -> {version}")
-        if doc_footer_stale(version):
-            print(f"    - docs/用户使用说明.md 页脚：「本文档对应 whu_meter v...」 -> v{version}")
-        print(f"  并自动提交（[skip ci]），tag {tag} 移动到该新提交")
-        ask_choice("  确认执行？[y/n] (y): ", {"y", "n"}, default="y") == "n" and sys.exit("已取消")
-
-    # -- 第 3 步：Release notes --
-    print("\n【第 3 步 / 4】Release notes 编写方式")
-    print("  1) 自动生成：综合上一个 tag 以来的 commit 记录")
-    print("  2) 手动编写：自己输入说明文字")
-    print("  3) 混合：手动内容在前，自动生成的变更列表追加在后（推荐）")
-    mode = ask_choice("请选择 [1/2/3] (3): ", {"1", "2", "3"}, default="3")
-    manual = ask_multiline("\n请输入手写说明：") if mode in ("2", "3") else ""
-    no_generate = (mode == "2")
-
-    # -- 第 4 步：确认并执行 --
-    print(f"\n【第 4 步 / 4】发布摘要")
-    print(f"  - tag / 版本号 : {tag} / {version}")
-    print(f"  - 安装包       : whu_meter_{tag}.zip")
-    owner_repo = "(发布时从 origin 解析)"
-    try:
-        owner_repo = "/".join(parse_owner_repo())
-    except SystemExit:
-        pass
-    print(f"  - 目标仓库     : {owner_repo}")
-    print("\n  1) 直接发布")
-    print("  2) 先 dry-run 预览（不做任何修改）")
-    print("  3) 取消")
-    act = ask_choice("请选择 [1/2/3] (1): ", {"1", "2", "3"}, default="1")
-    if act == "3":
-        sys.exit("已取消")
-    print()
-    return tag, manual, no_generate, act == "2"
-
-
-# ---------------------------------------------------------------- 发布流程
-
-def resolve_tag(explicit):
-    if explicit:
-        return explicit
-    tags_on_head = run(["git", "tag", "--points-at", "HEAD"]).split()
-    if not tags_on_head:
-        raise SystemExit("[错误] 当前 HEAD 上没有 tag。请先打 tag，例如：git tag v1.1.4")
-    if len(tags_on_head) > 1:
-        raise SystemExit(f"[错误] 当前 HEAD 上有多个 tag：{tags_on_head}，请显式指定一个")
-    return tags_on_head[0]
-
-
-def sync_version(tag, version, dry):
-    """将 manifest.json 的 version 与用户使用说明页脚的版本字样对齐到 tag。"""
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    m_changed = manifest.get("version") != version
-
-    d_changed = False
-    if USER_DOC.exists():
-        doc_text = USER_DOC.read_text(encoding="utf-8")
-        doc_new = re.sub(r"(本文档对应\s*whu_meter\s*v)[\d.]+", rf"\g<1>{version}", doc_text)
-        d_changed = doc_new != doc_text
-    else:
-        doc_new = None
-
-    if not m_changed and not d_changed:
-        print(f"[1/5] 版本号已同步：manifest.json = {version}，使用说明页脚 = v{version}")
-        return
-    if dry:
-        detail = []
-        if m_changed:
-            detail.append(f"manifest.json {manifest.get('version')} -> {version}")
-        if d_changed:
-            detail.append("使用说明页脚 -> " + f"v{version}")
-        print(f"[1/5] (dry-run) 将更新 {'、'.join(detail)} 并提交、移动 tag")
-        return
-
-    if m_changed:
+    if manifest.get("version") != version:
         manifest["version"] = version
         MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    if d_changed:
-        USER_DOC.write_text(doc_new, encoding="utf-8")
+        paths.append(MANIFEST)
+    if sync_doc and USER_DOC.exists():
+        text = USER_DOC.read_text(encoding="utf-8")
+        new = re.sub(r"(本文档对应\s*whu_meter\s*v)[\d.]+", rf"\g<1>{version}", text)
+        new = re.sub(r"(适用版本：\s*v)[\d.]+", rf"\g<1>{version}", new)
+        if new != text:
+            USER_DOC.write_text(new, encoding="utf-8")
+            paths.append(USER_DOC)
+    return paths
 
-    add_paths = [str(MANIFEST.relative_to(REPO_ROOT).as_posix())]
-    if d_changed:
-        add_paths.append(str(USER_DOC.relative_to(REPO_ROOT).as_posix()))
-    run(["git", "add", *add_paths])
-    run(["git", "commit", "-m", f"chore(release): 同步集成版本号至 {tag} [skip ci]"])
-    run(["git", "tag", "-f", tag])
-    print(f"[1/5] 版本号已更新为 {version}（manifest{'、使用说明页脚' if d_changed else ''}），tag 已移动到新提交")
 
+# ---------------------------------------------------------------- 打包 / 发布
 
-def build_zip(tag, version, dry):
+def build_zip(tag, dry):
     out = REPO_ROOT / f"whu_meter_{tag}.zip"
     if dry:
-        print(f"[2/5] (dry-run) 将生成 {out.name}")
+        print(f"[4/5] (dry-run) 将生成 {out.name}")
         return out
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for root, dirs, files in os.walk(COMPONENT_DIR):
@@ -243,18 +204,8 @@ def build_zip(tag, version, dry):
                     continue
                 full = Path(root) / f
                 z.write(full, full.relative_to(REPO_ROOT).as_posix())
-    print(f"[2/5] 已打包 {out.name}（{out.stat().st_size} 字节）")
+    print(f"[4/5] 已打包 {out.name}（{out.stat().st_size} 字节）")
     return out
-
-
-def push(tag, dry):
-    branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-    if dry:
-        print(f"[3/5] (dry-run) 将推送 {branch} 与 tag {tag} 到 origin")
-        return
-    run(["git", "push", "origin", branch])
-    run(["git", "push", "origin", tag, "--force"])
-    print(f"[3/5] 已推送 {branch} 与 {tag} 到 origin")
 
 
 def get_token():
@@ -298,11 +249,14 @@ def gh_api(token, url, method="GET", data=None, content_type="application/json",
 
 
 def auto_notes(tag):
-    tags = run(["git", "tag", "--sort=-creatordate"]).split()
-    if tag not in tags:
-        return ""
-    idx = tags.index(tag)
-    prev = tags[idx + 1] if idx + 1 < len(tags) else None
+    """自上一个版本 tag 以来的 commit 列表"""
+    cur = VER_RE.match(tag)
+    prev = None
+    for t in run(["git", "tag", "--sort=-v:refname"]).split():
+        m = VER_RE.match(t)
+        if m and tuple(map(int, m.groups())) < tuple(map(int, cur.groups())):
+            prev = t
+            break
     rng = f"{prev}..{tag}" if prev else tag
     log = run(["git", "log", rng, "--no-merges", "--pretty=- %h %s"])
     header = f"自上一个版本 {prev} 以来的变更：" if prev else "首个版本的变更："
@@ -319,13 +273,24 @@ def build_notes(tag, manual, no_generate):
     if not parts:
         parts.append(" maintenance release ")
     body = "\n\n".join(parts)
-    print(f"[4/5] Release notes:\n{'-' * 40}\n{body}\n{'-' * 40}")
+    print(f"[5/5] Release notes:\n{'-' * 40}\n{body}\n{'-' * 40}")
     return body, not no_generate
 
 
-def upload_release(token, owner, repo, tag, name, zip_path, body, generate, dry):
+def push_all(tag, dry):
+    branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
     if dry:
-        print(f"[5/5] (dry-run) 将在 {owner}/{repo} 创建/更新 Release {tag} 并上传 {zip_path.name}")
+        print(f"[推送] (dry-run) 将推送 {branch} 与 tag {tag} 到 origin")
+        return
+    run(["git", "push", "origin", branch])
+    run(["git", "push", "origin", tag, "--force"])
+    print(f"[推送] 已同步远端：{branch} -> 发版 commit，tag {tag}")
+
+
+def upload_release(token, owner, repo, tag, zip_path, body, generate, dry):
+    name = f"whu_meter {tag}"
+    if dry:
+        print(f"[Release] (dry-run) 将在 {owner}/{repo} 创建/更新 Release {tag} 并上传 {zip_path.name}")
         return
     status, rel = gh_api(token, f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}")
     if status == 200 and rel:
@@ -336,7 +301,7 @@ def upload_release(token, owner, repo, tag, name, zip_path, body, generate, dry)
             if a["name"] == zip_path.name:
                 gh_api(token, f"https://api.github.com/repos/{owner}/{repo}/releases/assets/{a['id']}", method="DELETE")
                 print(f"      已删除旧资产 {a['name']}")
-        print(f"[5/5] Release 已更新：{html_url}")
+        print(f"[Release] Release 已更新：{html_url}")
     else:
         status, rel = gh_api(token, f"https://api.github.com/repos/{owner}/{repo}/releases", method="POST",
                              data={"tag_name": tag, "name": name, "body": body,
@@ -344,8 +309,7 @@ def upload_release(token, owner, repo, tag, name, zip_path, body, generate, dry)
         if status not in (200, 201):
             raise SystemExit(f"[错误] 创建 Release 失败（HTTP {status}）：{rel}")
         release_id, html_url = rel["id"], rel["html_url"]
-        print(f"[5/5] Release 已创建：{html_url}")
-    # 上传 zip 资产
+        print(f"[Release] Release 已创建：{html_url}")
     data = zip_path.read_bytes()
     status, resp = gh_api(token, f"https://uploads.github.com/repos/{owner}/{repo}/releases/{release_id}/assets"
                           f"?name={zip_path.name}", method="POST", data=data,
@@ -356,40 +320,147 @@ def upload_release(token, owner, repo, tag, name, zip_path, body, generate, dry)
     print("\n完成。发布页：" + html_url)
 
 
-def release(tag, manual="", no_generate=False, dry=False):
-    if not tag.startswith("v"):
-        raise SystemExit(f"[错误] tag 应以 v 开头（当前：{tag}）")
-    version = tag[1:]
-    print(f"发布目标：{tag}（集成版本号 {version}）\n")
-
-    sync_version(tag, version, dry)
-    zip_path = build_zip(tag, version, dry)
-    push(tag, dry)
-
+def publish(tag, manual, no_generate, dry):
+    """推送 commit/tag 并创建 Release（dry=True 时只打印）"""
+    zip_path = build_zip(tag, dry)
+    push_all(tag, dry)
     token = get_token()
     owner, repo = parse_owner_repo()
-    print(f"[4/5] 目标仓库：{owner}/{repo}")
+    print(f"[Release] 目标仓库：{owner}/{repo}")
     body, generate = build_notes(tag, manual, no_generate)
-    name = f"whu_meter {tag}"
-    upload_release(token, owner, repo, tag, name, zip_path, body, generate, dry)
+    upload_release(token, owner, repo, tag, zip_path, body, generate, dry)
+
+
+# ---------------------------------------------------------------- 交互模式
+
+def choose_version():
+    latest = latest_tag()
+    base = latest or "v0.0.0"
+    print("\n【第 1 步 / 5】选择新版本号（git 上当前最新版本：" + base + "）")
+    print(f"  1) {bump_version(base, 'major')}（主版本 +1）")
+    print(f"  2) {bump_version(base, 'minor')}（次版本 +1）")
+    print(f"  3) {bump_version(base, 'patch')}（修订号 +1）")
+    print("  4) 自定义输入")
+    sel = ask_choice("请选择 [1/2/3/4] (3): ", {"1", "2", "3", "4"}, default="3")
+    if sel != "4":
+        return bump_version(base, {"1": "major", "2": "minor", "3": "patch"}[sel])
+    while True:
+        tag = ask("请输入版本 tag（以 v 开头，如 v1.1.4）: ")
+        if VER_RE.match(tag):
+            break
+        print("  格式应为 vX.Y.Z（如 v1.2.3），请重试")
+    if latest and tuple(map(int, VER_RE.match(tag).groups())) <= \
+            tuple(map(int, VER_RE.match(latest).groups())):
+        print(f"  [提示] {tag} 不高于当前最新版本 {latest}，发布时将覆盖已有 tag / Release")
+        if ask_choice("  确认使用？[y/n] (n): ", {"y", "n"}) != "y":
+            sys.exit("已取消")
+    return tag
+
+
+def interactive():
+    print("=" * 56)
+    print("  whu_meter 集成发布向导")
+    print("=" * 56)
+
+    # 第 1 步：版本号
+    tag = choose_version()
+    version = tag[1:]
+
+    # 第 2 步：工作区
+    stash_used = handle_changes() == "stashed"
+
+    # 第 3 步：发版 commit
+    print(f"\n【第 3 步 / 5】发版 commit")
+    sync_doc = ask_choice(
+        "是否同步「用户使用说明.md」（页首适用版本 + 页尾版本字样）？[y/n] (y): ",
+        {"y", "n"}, default="y") == "y"
+    changed = apply_version_updates(version, sync_doc)
+    names = "、".join(p.name for p in changed) if changed else "（版本号均已一致，无文件改动）"
+    print(f"  将更新：{names}")
+    print(f"  commit 信息：chore(release): bump version to {tag}")
+    run(["git", "add", *(p.relative_to(REPO_ROOT).as_posix() for p in changed)])
+    run(["git", "commit", "-m", f"chore(release): bump version to {tag}"])
+    print(f"  发版 commit 已创建：{run(['git', 'rev-parse', '--short', 'HEAD'])}")
+
+    # 第 4 步：打 tag
+    print(f"\n【第 4 步 / 5】打 tag")
+    run(["git", "tag", "-f", tag])
+    print(f"  tag {tag} 已指向发版 commit")
+
+    # 第 5 步：notes 与发布
+    print(f"\n【第 5 步 / 5】Release notes 编写方式")
+    print("  1) 自动生成：综合上一个版本 tag 以来的 commit 记录")
+    print("  2) 手动编写：自己输入说明文字")
+    print("  3) 混合：手动内容在前，自动生成的变更列表追加在后（推荐）")
+    mode = ask_choice("请选择 [1/2/3] (3): ", {"1", "2", "3"}, default="3")
+    manual = ask_multiline("\n请输入手写说明：") if mode in ("2", "3") else ""
+    no_generate = (mode == "2")
+
+    print("\n发布摘要")
+    print(f"  - 版本 tag    : {tag}")
+    print(f"  - 安装包      : whu_meter_{tag}.zip")
+    print(f"  - 发版 commit : {run(['git', 'rev-parse', '--short', 'HEAD'])}")
+    print("\n  1) 直接发布（推送 commit + tag，创建/更新 Release）")
+    print("  2) 先 dry-run 预览（不推送、不上传）")
+    print("  3) 取消（commit 与 tag 已创建，仅跳过发布，可稍后重跑本脚本补发布）")
+    act = ask_choice("请选择 [1/2/3] (1): ", {"1", "2", "3"}, default="1")
+
+    try:
+        if act == "3":
+            print("已跳过发布。发版 commit 与 tag 已在本地，随时可重新运行脚本或 git push 手动发布。")
+            return
+        if act == "2":
+            publish(tag, manual, no_generate, dry=True)
+            if ask_choice("\n按预览执行发布？[y/n] (y): ", {"y", "n"}, default="y") != "y":
+                print("已跳过发布。发版 commit 与 tag 已在本地，可稍后重跑本脚本补发布。")
+                return
+        publish(tag, manual, no_generate, dry=False)
+    finally:
+        if stash_used:
+            out = run(["git", "stash", "list"])
+            if "release.py 自动暂存" in out:
+                run(["git", "stash", "pop"])
+                print("\n[复原] 已从 stash 恢复发版前的工作区改动")
+
+
+def release_cli(args):
+    """命令行模式：要求工作区干净，直接完成 commit/tag/发布"""
+    staged, unstaged, untracked = detect_changes()
+    if staged or unstaged or untracked:
+        raise SystemExit(
+            "[错误] 工作区存在未提交文件（已暂存/未暂存/未跟踪），命令行模式不予处理。\n"
+            "  请先提交或清理，或改用交互模式：python scripts/release.py")
+
+    tag = args.tag
+    if not tag:
+        raise SystemExit("[错误] 命令行模式需指定版本 tag，如：python scripts/release.py v1.1.5")
+    if not VER_RE.match(tag):
+        raise SystemExit(f"[错误] tag 格式应为 vX.Y.Z（当前：{tag}）")
+    version = tag[1:]
+
+    changed = apply_version_updates(version, not args.no_doc)
+    run(["git", "add", *(p.relative_to(REPO_ROOT).as_posix() for p in changed)])
+    if run(["git", "status", "--porcelain"]):
+        run(["git", "commit", "-m", f"chore(release): bump version to {tag}"])
+    run(["git", "tag", "-f", tag])
+    print(f"发版 commit 与 tag {tag} 已就绪\n")
+    publish(tag, args.notes, args.no_generate, args.dry_run)
 
 
 def main():
     # 不带参数 -> 交互模式
     if len(sys.argv) == 1:
-        tag, manual, no_generate, dry = interactive()
-        release(tag, manual, no_generate, dry)
+        interactive()
         return
 
     ap = argparse.ArgumentParser(description="whu_meter 集成发布脚本（不带参数运行进入交互向导）")
-    ap.add_argument("tag", nargs="?", help="要发布的 tag（默认取当前 HEAD 上的 tag）")
+    ap.add_argument("tag", nargs="?", help="要发布的版本 tag（格式 vX.Y.Z，自动创建发版 commit 与 tag）")
     ap.add_argument("--notes", default="", help="手动编写的 release notes")
     ap.add_argument("--no-generate", action="store_true", help="不自动追加 GitHub 生成的 What's Changed")
+    ap.add_argument("--no-doc", action="store_true", help="不同步「用户使用说明.md」的版本字样")
     ap.add_argument("--dry-run", action="store_true", help="只预览，不实际执行")
     args = ap.parse_args()
-
-    tag = resolve_tag(args.tag)
-    release(tag, args.notes, args.no_generate, args.dry_run)
+    release_cli(args)
 
 
 if __name__ == "__main__":
