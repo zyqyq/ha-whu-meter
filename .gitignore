@@ -1,0 +1,26 @@
+# 打包产物：由 scripts/release.py 生成并上传到 GitHub Release，不入库
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# GitHub 令牌本地文件（release.py 的备选读取位置，绝不入库）
+.github_token
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 编辑器 / IDE
+.idea/
+.vscode/
+*.swp
+*~

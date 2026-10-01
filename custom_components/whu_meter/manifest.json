@@ -1,0 +1,15 @@
+{
+  "domain": "whu_meter",
+  "name": "WHU Electricity Meter",
+  "codeowners": [
+    "@zyqyq"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/zyqyq/ha-whu-meter",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/zyqyq/ha-whu-meter/blob/main/docs/%E7%94%A8%E6%88%B7%E4%BD%BF%E7%94%A8%E8%AF%B4%E6%98%8E.md",
+  "requirements": [],
+  "single_config_entry": false,
+  "version": "1.1.3"
+}

@@ -1,0 +1,65 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "武大水电表",
+        "description": "填写水电服务平台网页根目录地址（即手机端打开的 URL 中 # 之前的部分）",
+        "data": {
+          "base_url": "网页根目录地址"
+        }
+      },
+      "area": {
+        "title": "选择区域",
+        "data": {
+          "area_id": "区域（学部宿舍区）"
+        }
+      },
+      "building": {
+        "title": "选择楼栋",
+        "data": {
+          "architecture_id": "楼栋"
+        }
+      },
+      "floor": {
+        "title": "选择楼层",
+        "data": {
+          "floor": "楼层"
+        }
+      },
+      "room": {
+        "title": "选择房间",
+        "data": {
+          "room_no": "房间号"
+        }
+      },
+      "meter": {
+        "title": "选择表具",
+        "description": "该房间下发现多块表，请选择要接入的表具",
+        "data": {
+          "meter_id": "表具"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接水电服务平台，请检查地址（需与手机端访问的根地址一致）",
+      "no_meter": "该房间下未发现表具，请返回上一步重新选择"
+    },
+    "abort": {
+      "already_configured": "该表具已接入"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "抓取与警报设置",
+        "description": "开启后集成会自动在 automations.yaml 中创建/维护「电费余额过低邮件警报」自动化，余额低于阈值时通过所选 SMTP 通知发送 HTML 警告邮件。",
+        "data": {
+          "scan_interval_minutes": "抓取频率（分钟）",
+          "balance_warn_threshold": "余额告警阈值（元）",
+          "email_alert_enabled": "余额过低邮件警报（自动创建自动化）",
+          "email_notify_entity": "SMTP 通知实体（需先在「设备与服务」中配置邮件通知集成）"
+        }
+      }
+    }
+  }
+}
