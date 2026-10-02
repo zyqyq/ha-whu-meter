@@ -1,0 +1,6 @@
+{
+  "name": "WHU 宿舍电费",
+  "render_readme": true,
+  "homeassistant": "2026.3.0",
+  "country": "CN"
+}

@@ -7,6 +7,8 @@
   python scripts/release.py
 
   流程：
+  第0步  发布前自检：检查 hacs.json / manifest.json 必需字段 / LICENSE / README /
+         HACS 校验工作流等，避免发布出无法被 HACS 识别的版本
   第1步  选择新版本号：基于 git 上最新 tag 给出 主版本/次版本/修订号 三种
          预制递增方案，也可自行输入（如 v1.1.4 -> v2.0.0 / v1.2.0 / v1.1.5）；
          另提供「补发布」：为已存在的 tag 补发 Release（不改版本号、不建 commit），
@@ -51,9 +53,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_DIR = REPO_ROOT / "custom_components" / "whu_meter"
 MANIFEST = COMPONENT_DIR / "manifest.json"
 USER_DOC = REPO_ROOT / "docs" / "用户使用说明.md"
+HACS_JSON = REPO_ROOT / "hacs.json"
+LICENSE_FILE = REPO_ROOT / "LICENSE"
+README_FILE = REPO_ROOT / "README.md"
 EXCLUDE_IN_ZIP = {"__pycache__", ".DS_Store", "Thumbs.db", "desktop.ini"}
 EXCLUDE_SUFFIX = (".pyc", ".pyo", ".log")
 VER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+# HACS / hassfest 对 manifest.json 的必需字段
+MANIFEST_REQUIRED = ("domain", "name", "version", "codeowners", "documentation",
+                     "issue_tracker", "integration_type", "iot_class")
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -242,6 +250,70 @@ def apply_version_updates(version, sync_doc):
             USER_DOC.write_text(new, encoding="utf-8")
             paths.append(USER_DOC)
     return paths
+
+
+# ---------------------------------------------------------------- 发布前自检
+
+def preflight(interactive_mode):
+    """HACS / hassfest 合规自检（只提示，不修改任何文件），返回未通过项数量"""
+    print("\n【发布前自检】")
+    fails, warns = [], []
+
+    # hacs.json：必须位于仓库根目录，且至少含 name
+    if not HACS_JSON.exists():
+        fails.append("缺少仓库根目录 hacs.json（HACS 将无法收录本仓库）")
+    else:
+        try:
+            hj = json.loads(HACS_JSON.read_text(encoding="utf-8"))
+            if hj.get("name"):
+                print(f"  [通过] hacs.json（name：{hj['name']}）")
+            else:
+                fails.append("hacs.json 缺少必填字段 name")
+        except ValueError as e:
+            fails.append(f"hacs.json 不是合法 JSON：{e}")
+
+    # manifest.json：必需字段 + domain 与目录名一致
+    try:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        missing = [k for k in MANIFEST_REQUIRED if not manifest.get(k)]
+        if missing:
+            fails.append("manifest.json 缺少字段：" + "、".join(missing))
+        if manifest.get("domain") != COMPONENT_DIR.name:
+            fails.append(f"manifest.domain（{manifest.get('domain')}）"
+                         f"与集成目录名（{COMPONENT_DIR.name}）不一致")
+        if not missing and manifest.get("domain") == COMPONENT_DIR.name:
+            print("  [通过] manifest.json：必需字段齐全，domain 与目录名一致")
+    except (OSError, ValueError) as e:
+        fails.append(f"manifest.json 读取失败：{e}")
+
+    # 根目录必备文件
+    for path, label in ((LICENSE_FILE, "LICENSE"), (README_FILE, "README.md")):
+        if path.exists():
+            print(f"  [通过] 根目录 {label}")
+        else:
+            fails.append(f"缺少根目录 {label}（HACS 收录要求）")
+
+    # 合规校验工作流
+    if (REPO_ROOT / ".github" / "workflows" / "validate.yml").exists():
+        print("  [通过] .github/workflows/validate.yml")
+    else:
+        warns.append("缺少 .github/workflows/validate.yml（HACS 官方建议的合规校验工作流）")
+
+    # HACS 从默认分支读取 hacs.json，并取最新 Release 的 tag 作为版本号
+    branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    if branch != "main":
+        warns.append(f"当前分支为 {branch}（HACS 默认读取 main 分支）")
+
+    for w in warns:
+        print(f"  [提示] {w}")
+    for f in fails:
+        print(f"  [未通过] {f}")
+
+    if fails and interactive_mode:
+        if ask_choice(f"  仍有 {len(fails)} 项未通过，仍要继续发布？[y/n] (n): ",
+                      {"y", "n"}, default="n") != "y":
+            sys.exit("已取消")
+    return len(fails)
 
 
 # ---------------------------------------------------------------- 打包 / 发布

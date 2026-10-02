@@ -1,5 +1,9 @@
 # WHU Electricity Meter Home Assistant
 
+[![Release](https://img.shields.io/github/v/release/zyqyq/ha-whu-meter?label=release)](https://github.com/zyqyq/ha-whu-meter/releases)
+[![Validate](https://github.com/zyqyq/ha-whu-meter/actions/workflows/validate.yml/badge.svg)](https://github.com/zyqyq/ha-whu-meter/actions/workflows/validate.yml)
+[![License](https://img.shields.io/github/license/zyqyq/ha-whu-meter)](LICENSE)
+
 对接水电服务平台（`http://zwhqbsd.whu.edu.cn/MobilePayWeb`），
 自动抓取宿舍电表的余额、累计电量、昨日/今日用量、上次抄表时间，并提供余额过低告警。
 「累计电量」传感器可直接接入 HA **能源（Energy）面板**。
@@ -19,6 +23,32 @@
 
 ## 安装
 
+本仓库为标准的 HACS 集成仓库结构（仓库根目录下 `custom_components/whu_meter/`），
+HACS 与 GPM 均可直接识别，安装后可自动检查更新。
+
+### 方式一：HACS（推荐）
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=zyqyq&repository=ha-whu-meter&category=integration)
+
+点击上方按钮，或手动操作：
+
+1. HACS → 右上角 ⋮ → **自定义存储库**
+2. 填入 `https://github.com/zyqyq/ha-whu-meter`，类别选 **集成**，添加
+3. 在 HACS 中搜索 **WHU 宿舍电费**，下载
+4. 重启 Home Assistant
+
+之后 HACS 会依据本仓库的 Release / tag 提示新版本，可在 HACS 内一键升级。
+
+### 方式二：GPM（GIT Package Manager）
+
+已安装 [GPM](https://github.com/tomasbedrich/gpm) 时：
+
+1. 设置 → 设备与服务 → 添加集成 → **GPM**
+2. 仓库地址填 `https://github.com/zyqyq/ha-whu-meter`
+3. GPM 会自动创建更新实体，新 tag / commit 发布后可一键更新
+
+### 方式三：手动安装
+
 1. 把 `custom_components/whu_meter/` 整个目录拷到 HA 配置目录：
 
    - 标准安装：`<config>/custom_components/whu_meter/`
@@ -29,12 +59,16 @@
      ```
 
 2. 重启 Home Assistant。
-3. 设置 → 设备与服务 → 添加集成 → 搜索 **“WHU Electricity Meter / 武大水电表”**。
-4. 按向导填写：
-   - **网页根目录地址**：手机端打开的 URL 中 `#` 之前的部分，默认
-     `http://zwhqbsd.whu.edu.cn`（如果部署在内网别的地址，照实填）。
-   - **区域 → 楼栋 → 楼层 → 房间**：逐级下拉选择（房间列表实时从服务器拉取），
-     多表房间会再让你选一次表具。
+
+## 配置
+
+设置 → 设备与服务 → 添加集成 → 搜索 **“WHU Electricity Meter / 武大水电表”**，
+按向导填写：
+
+- **网页根目录地址**：手机端打开的 URL 中 `#` 之前的部分，默认
+  `http://zwhqbsd.whu.edu.cn`（如果部署在内网别的地址，照实填）。
+- **区域 → 楼栋 → 楼层 → 房间**：逐级下拉选择（房间列表实时从服务器拉取），
+  多表房间会再让你选一次表具。
 
 ## 选项（抓取配置）
 
@@ -42,6 +76,7 @@
 
 - **抓取频率**：每 5~1440 分钟一次（默认 15 分钟；登录+查询约 2 个请求/次）。
 - **余额告警阈值**：默认 20 元。
+- **余额过低邮件警报**：开启后自动创建 / 维护告警自动化，可指定 SMTP 通知实体。
 
 ## 接入能源模块
 
@@ -57,37 +92,11 @@
   基于日值传感器自行聚合。
 - 若平台修改了前端内置账号或签名算法，需要同步更新 `const.py` / `api.py`。
 
----
+## 文档
 
-## 版本发布流程
+- [用户使用说明](docs/用户使用说明.md) —— 面向使用者：安装、配置、实体、告警邮件、常见问题
+- [开发者说明](docs/开发者说明.md) —— 面向维护者：仓库结构、HACS/GPM 合规要点、发布流程、网络排查
 
-推荐使用交互向导：`python scripts/release.py`（不带参数运行）。
+## 许可
 
-1. **选择新版本号**：基于 git 上最新 tag 给出主版本 / 次版本 / 修订号三种递增方案，也可自定义输入（如 v1.1.5 -> v2.0.0 / v1.2.0 / v1.1.6）；另可选 **5) 补发布**：为已存在的 tag 补发 Release（不改版本号、不建 commit），用于发版中断（如网络异常）后的重试
-2. **工作区检查**：列出未提交文件（已暂存/未暂存/未跟踪），可选 合并提交（并入发版 commit，未跟踪文件需自行处理后继续）/ 撤回（丢弃，需二次确认）/ stash 保留（发版结束后自动复原）
-3. **发版 commit**：选择是否同步「用户使用说明.md」（页首适用版本 + 页尾版本字样），与 manifest.json 一并提交为 `chore(release): bump version to vX.Y.Z`
-4. **打 tag**：自动在发版 commit 上打 tag
-5. **发布**：编写 Release notes（自动生成 / 手动 / 混合），支持先 dry-run 预览再按预览执行；发布同时推送发版 commit 与 tag，创建/更新 Release 并上传 `whu_meter_vX.Y.Z.zip`
-
-熟练后可用命令行模式（要求工作区干净）：`python scripts/release.py v1.1.5 --notes "说明" [--no-doc] [--dry-run]`。
-
-首次使用前，将 GitHub PAT（repo 权限）写入仓库根目录 `.github_token` 文件，或设置环境变量 `GITHUB_TOKEN`。
-
-### TLS 证书问题说明
-
-Python 3.13 起 `ssl.create_default_context()` 默认启用 `VERIFY_X509_STRICT`，会额外要求证书链上每个 CA 证书都携带 `authorityKeyIdentifier` 扩展。部分 Windows 证书库（以及本地代理软件自签的根证书）不满足该要求，直连 `api.github.com` 时会报：
-
-```
-[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: Missing Authority Key Identifier
-```
-
-脚本会自动关闭这一项额外的严格扩展检查（**证书链与主机名校验仍然开启**），失败时回退尝试 `certifi` 的 CA 包，仍不行则提示设置 `SSL_CERT_FILE`。此问题只影响发布脚本的 API 调用，不影响 `git push`（走 SSH）。
-
-### 网络通道说明
-
-脚本调用 GitHub API 时按以下顺序自动尝试，任一通道拿到正常响应即停止：
-
-1. **直连**（不使用代理，超时 25s）
-2. **系统代理 / 环境变量**（`HTTPS_PROXY` 或 Windows 注册表中的系统代理，超时 120s）
-
-之所以优先直连：本机若运行开发代理/加速软件（如 DevSidecar，通常把自己设为系统代理，端口形如 `127.0.0.1:31181`），它可能拦截 `api.github.com` 并返回自己的 500 错误页（响应体含 `DevSidecar Error` / `DS-Interceptor`），此时直连反而是通的。**HTTP 5xx 会被视为通道故障并自动切换下一条通道**；4xx 属于接口的正常应答，不会重试。
+[MIT](LICENSE)
