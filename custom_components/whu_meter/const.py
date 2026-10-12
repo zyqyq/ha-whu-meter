@@ -43,3 +43,7 @@ PATH_DAY_VALUE = "/v3/XINTF/GetMeterDayValue"
 SIGNIN_ACCOUNT = "ph"
 SIGNIN_PASSWORD = "phAPI"
 SIGNIN_SYS_ID = 1
+
+# 配置流第一步若填了外部/生产地址（见 guard.is_restricted_base_url），
+# 必须先经过一步「警告 + 确认」；该字段就是那个确认勾选框。
+CONF_CONFIRM_REAL_SERVER = "confirm_real_server"
