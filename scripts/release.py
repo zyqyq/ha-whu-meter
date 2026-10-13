@@ -485,9 +485,12 @@ def upload_release(token, owner, repo, tag, zip_path, body, generate, dry):
 
 def publish(tag, manual, no_generate, dry):
     """推送 commit/tag 并创建 Release（dry=True 时只打印）"""
+    # 令牌必须先校验：push 是"出了门就收不回"的动作，等 push 完才发现缺令牌，
+    # 会留下"commit + tag 已在远端、却发不出 Release"的半成品状态。
+    # dry-run 不写远端，也就不需要令牌。
+    token = None if dry else get_token()
     zip_path = build_zip(tag, dry)
     push_all(tag, dry)
-    token = get_token()
     owner, repo = parse_owner_repo()
     print(f"[Release] 目标仓库：{owner}/{repo}")
     body, generate = build_notes(tag, manual, no_generate)
