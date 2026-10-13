@@ -10,7 +10,7 @@
       },
       "confirm_real_server": {
         "title": "Confirm external server",
-        "description": "The address you entered is treated as an **external / production server**:\n\n{base_url}\n\nIf you continue, the integration will **immediately send real requests to this server** (sign in, then walk down the area / building / floor / room / meter lists). Every request is throttled to at most one per second, but they are real traffic initiated by you and will be recorded by that server.\n\n· Local debugging only: close this dialog and go back to use a loopback or LAN address (for example http://host.docker.internal:8899).\n· Connect to this server: tick the option below, then submit.",
+        "description": "The address you entered is treated as an **external / production server**:\n\n{base_url}\n\nIf you continue, the integration will **immediately send real requests to this server** (sign in, then walk down the area / building / floor / room / meter lists). Every request is throttled to at most one per second, but they are real traffic initiated by you and will be recorded by that server.\n\n· Local debugging only: close this dialog and go back to use a loopback or LAN address (for example 127.0.0.1:8899).\n· Connect to this server: tick the option below, then submit.",
         "data": {
           "confirm_real_server": "I understand this is an external / production server and consent to real requests"
         }
